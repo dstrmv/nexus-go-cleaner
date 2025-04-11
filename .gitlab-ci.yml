@@ -1,0 +1,83 @@
+stages:
+  - build
+  - publish
+  - release
+
+build dev:
+  stage: build
+  image: golang:1.23.6-alpine
+  rules:
+    - if: "$CI_COMMIT_BRANCH"
+  script:
+    - go get narc
+    - VERSION=${CI_COMMIT_BRANCH}-${CI_PIPELINE_ID}
+    - GOOS=linux GOARCH=amd64 go build -ldflags="-X 'main.appVersion=$VERSION'" -o ./narc-amd64-linux
+    - GOOS=windows GOARCH=amd64 go build -ldflags="-X 'main.appVersion=$VERSION'" -o ./narc-amd64.exe
+  artifacts:
+    paths:
+      - ./narc-amd64-linux
+      - ./narc-amd64.exe
+    expire_in: 1 week
+
+build release:
+  stage: build
+  image: golang:1.23.6-alpine
+  rules:
+    - if: "$CI_COMMIT_TAG"
+  script:
+    - go get narc
+    - VERSION=$CI_COMMIT_TAG
+    - GOOS=linux GOARCH=amd64 go build -ldflags="-X 'main.appVersion=$VERSION'" -o ./narc-amd64-linux
+    - GOOS=windows GOARCH=amd64 go build -ldflags="-X 'main.appVersion=$VERSION'" -o ./narc-amd64.exe
+  artifacts:
+    paths:
+      - ./narc-amd64-linux
+      - ./narc-amd64.exe
+    expire_in: 1 month
+
+build and publish docker image:
+  stage: publish
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""]
+  rules:
+    - if: "$CI_COMMIT_TAG"
+  script:
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"$DOCKER_REGISTRY_PUBLISH_URL\":{\"username\":\"$DOCKER_REGISTRY_PUBLISH_USER\",\"password\":\"$DOCKER_REGISTRY_PUBLISH_PASS\"}}}" > /kaniko/.docker/config.json
+    - /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "${DOCKER_REGISTRY_PUBLISH_URL}/${CI_PROJECT_NAME}:${CI_COMMIT_TAG}"
+
+
+upload to gitlab package registry:
+  stage: publish
+  image: curlimages/curl:latest
+  rules:
+    - if: "$CI_COMMIT_TAG"
+  script:
+    - 'curl --fail-with-body --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file ./narc-amd64-linux "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/narc/$CI_COMMIT_TAG/narc-amd64-linux"'
+    - 'curl --fail-with-body --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file ./narc-amd64.exe "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/narc/$CI_COMMIT_TAG/narc-amd64.exe"'
+  needs:
+    - job: build release
+
+release_job:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    - if: $CI_COMMIT_TAG                 # Run this job when a tag is created
+  script:
+    - echo "running release_job"
+  release: # See https://docs.gitlab.com/ee/ci/yaml/#release for available properties
+    tag_name: '$CI_COMMIT_TAG'
+    description: '$CI_COMMIT_TAG'
+    assets:
+      links:
+        - name: amd64-linux
+          url: ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/narc/$CI_COMMIT_TAG/narc-amd64-linux
+        - name: amd64-windows
+          url: ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/narc/$CI_COMMIT_TAG/narc-amd64.exe
+  needs:
+    - job: build release
+    - job: upload to gitlab package registry
